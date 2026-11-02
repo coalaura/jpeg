@@ -53,3 +53,24 @@ const openjpegConfig = `#define OPJ_PACKAGE_VERSION "2.5.4"
 #define MUTEX_pthread 1
 #endif
 `
+
+const highwayMinGWConfig = `// MinGW GCC can misalign stack temporaries for wide vector arguments passed
+// by value (GCC PR 54412, reproduced with GCC 15.2). libjxl passes such
+// arguments outside Highway's VecArg wrappers. Retain SSE dispatch, but
+// exclude AVX2 and wider targets for this compiler/ABI combination.
+#if HWY_ARCH_X86_64 && HWY_OS_WIN && HWY_COMPILER_GCC_ACTUAL
+#define HWY_BROKEN_MINGW (HWY_AVX2 | (HWY_AVX2 - 1))
+#else
+#define HWY_BROKEN_MINGW 0
+#endif
+
+`
+
+const jxlFastLosslessMinGWConfig = `// This encoder has its own SIMD dispatch, independent of Highway. Avoid
+// MinGW GCC's misaligned wide-vector stack stores here too (GCC PR 54412).
+#if FJXL_ARCH_IS_X86_64 && defined(_WIN32) && defined(__GNUC__) && !defined(__clang__)
+#define FJXL_ENABLE_AVX2 0
+#define FJXL_ENABLE_AVX512 0
+#endif
+
+`

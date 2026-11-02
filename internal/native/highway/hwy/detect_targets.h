@@ -258,11 +258,21 @@
 #define HWY_BROKEN_PPC10 0
 #endif
 
+// MinGW GCC can misalign stack temporaries for wide vector arguments passed
+// by value (GCC PR 54412, reproduced with GCC 15.2). libjxl passes such
+// arguments outside Highway's VecArg wrappers. Retain SSE dispatch, but
+// exclude AVX2 and wider targets for this compiler/ABI combination.
+#if HWY_ARCH_X86_64 && HWY_OS_WIN && HWY_COMPILER_GCC_ACTUAL
+#define HWY_BROKEN_MINGW (HWY_AVX2 | (HWY_AVX2 - 1))
+#else
+#define HWY_BROKEN_MINGW 0
+#endif
+
 // Allow the user to override this without any guarantee of success.
 #ifndef HWY_BROKEN_TARGETS
 
 #define HWY_BROKEN_TARGETS                                     \
-  (HWY_BROKEN_CLANG6 | HWY_BROKEN_32BIT | HWY_BROKEN_MSVC |    \
+  (HWY_BROKEN_MINGW | HWY_BROKEN_CLANG6 | HWY_BROKEN_32BIT | HWY_BROKEN_MSVC |    \
    HWY_BROKEN_AVX3_DL_ZEN4 | HWY_BROKEN_AVX3_SPR |             \
    HWY_BROKEN_ARM7_BIG_ENDIAN | HWY_BROKEN_ARM7_WITHOUT_VFP4 | \
    HWY_BROKEN_NEON_BF16 | HWY_BROKEN_SVE | HWY_BROKEN_PPC10)

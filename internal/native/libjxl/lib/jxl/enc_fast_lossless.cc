@@ -46,6 +46,13 @@ using ssize_t = intptr_t;
 #endif  // _MSC_VER
 #endif  // FJXL_ARCH_IS_X86
 
+// This encoder has its own SIMD dispatch, independent of Highway. Avoid
+// MinGW GCC's misaligned wide-vector stack stores here too (GCC PR 54412).
+#if FJXL_ARCH_IS_X86_64 && defined(_WIN32) && defined(__GNUC__) && !defined(__clang__)
+#define FJXL_ENABLE_AVX2 0
+#define FJXL_ENABLE_AVX512 0
+#endif
+
 // Enable NEON and AVX2/AVX512 if not asked to do otherwise and the compilers
 // support it.
 #if defined(__aarch64__) || defined(_M_ARM64)  // ARCH

@@ -221,6 +221,11 @@ func generateJXL() {
 		return strings.HasSuffix(path, ".h") && !strings.Contains(path, "tests/")
 	})
 
+	targets := "internal/native/highway/hwy/detect_targets.h"
+	targetConfig := patch(read(targets), "// Allow the user to override this without any guarantee of success.\n#ifndef HWY_BROKEN_TARGETS", highwayMinGWConfig+"// Allow the user to override this without any guarantee of success.\n#ifndef HWY_BROKEN_TARGETS")
+	targetConfig = patch(targetConfig, "(HWY_BROKEN_CLANG6 |", "(HWY_BROKEN_MINGW | HWY_BROKEN_CLANG6 |")
+	write(targets, targetConfig)
+
 	highway := []string{"abort", "aligned_allocator", "per_target", "print", "targets", "timer"}
 
 	for _, source := range highway {
@@ -272,6 +277,9 @@ func generateJXL() {
 	}
 
 	write("internal/native/libjxl/lib/include/jxl/version.h", "#pragma once\n#define JPEGXL_MAJOR_VERSION 0\n#define JPEGXL_MINOR_VERSION 11\n#define JPEGXL_PATCH_VERSION 1\n#define JPEGXL_COMPUTE_VERSION(major, minor, patch) ((major) * 1000000 + (minor) * 1000 + (patch))\n#define JPEGXL_NUMERIC_VERSION JPEGXL_COMPUTE_VERSION(0, 11, 1)\n")
+
+	fastLossless := "internal/native/libjxl/lib/jxl/enc_fast_lossless.cc"
+	write(fastLossless, patch(read(fastLossless), "// Enable NEON and AVX2/AVX512 if not asked to do otherwise", jxlFastLosslessMinGWConfig+"// Enable NEON and AVX2/AVX512 if not asked to do otherwise"))
 }
 
 func wrapper(pkg, dep, source, prefix string) {

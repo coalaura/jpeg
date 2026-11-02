@@ -92,4 +92,6 @@ Decoders default to a 64 MiB compressed-input limit and a 16M-pixel limit. Codec
 
 Linux, Windows and macOS on amd64 and arm64, with portable CPU baselines. Classic JPEG uses source-based SIMDe on amd64 and native NEON on arm64. The amd64 path avoids an assembler dependency but has lower encoding throughput than upstream's NASM implementation.
 
+On Windows amd64, JPEG XL builds with GCC disable AVX2/AVX-512 paths to avoid a compiler stack-alignment bug. Highway retains SSE dispatch and the fast-lossless encoder uses its portable path. Clang/Zig builds retain the wider SIMD paths.
+
 See the [Go documentation](https://pkg.go.dev/github.com/coalaura/jpeg) and individual package references for option defaults, validation, resource limits and native sample representations.
