@@ -34,6 +34,7 @@ const (
 	SYCC
 	EYCC
 	CMYK
+	ICCRGB // RGB channels whose primaries and transfer curves are defined by ICC.
 )
 
 const (
@@ -64,7 +65,7 @@ type Options struct {
 	Progression             Progression
 	CodeBlockWidth          int // Zero selects 64; powers of two 4..1024, area <=4096.
 	CodeBlockHeight         int
-	MultiComponentTransform *bool  // Nil enables reversible/irreversible RGB transform for SRGB.
+	MultiComponentTransform *bool  // Nil enables reversible/irreversible RGB transform for SRGB and ICCRGB.
 	SOP                     bool   // Emit start-of-packet markers.
 	EPH                     bool   // Emit end-of-packet-header markers.
 	Threads                 int    // Zero selects 1, maximum 16.
@@ -305,7 +306,7 @@ func EncodeNative(writer io.Writer, img *NativeImage, options *Options) error {
 				colorChannels = 1
 			}
 
-			if img.ColorSpace != SRGB && img.ColorSpace != Gray && img.ColorSpace != SYCC || index != colorChannels || len(img.Components) != colorChannels+1 {
+			if img.ColorSpace != SRGB && img.ColorSpace != ICCRGB && img.ColorSpace != Gray && img.ColorSpace != SYCC || index != colorChannels || len(img.Components) != colorChannels+1 {
 				return errors.New("jpeg2000: alpha requires a final opacity component after gray or RGB/YCC color channels")
 			}
 		}
@@ -456,7 +457,7 @@ func decode(reader io.Reader, options *DecodeOptions, header bool) (*NativeImage
 	} else if len(img.ICC) >= 128 && string(img.ICC[36:40]) == "acsp" {
 		switch string(img.ICC[16:20]) {
 		case "RGB ":
-			img.ColorSpace = SRGB
+			img.ColorSpace = ICCRGB
 		case "GRAY":
 			img.ColorSpace = Gray
 		case "CMYK":
@@ -470,8 +471,12 @@ func decode(reader io.Reader, options *DecodeOptions, header bool) (*NativeImage
 func encoderOptions(img *NativeImage, settings *Options) (C.cj_j2k_options, error) {
 	var native C.cj_j2k_options
 
-	if settings.Format < JP2 || settings.Format > J2K || img.ColorSpace < Unspecified || img.ColorSpace > CMYK || settings.Progression < LRCP || settings.Progression > CPRL {
+	if settings.Format < JP2 || settings.Format > J2K || img.ColorSpace < Unspecified || img.ColorSpace > ICCRGB || settings.Progression < LRCP || settings.Progression > CPRL {
 		return native, errors.New("jpeg2000: invalid format, color space, or progression")
+	}
+
+	if img.ColorSpace == ICCRGB && (settings.Format != JP2 || len(img.ICC) < 128 || string(img.ICC[36:40]) != "acsp" || string(img.ICC[16:20]) != "RGB ") {
+		return native, errors.New("jpeg2000: ICC-defined RGB requires an RGB ICC profile and JP2")
 	}
 
 	if settings.Threads == 0 {
@@ -538,6 +543,13 @@ func encoderOptions(img *NativeImage, settings *Options) (C.cj_j2k_options, erro
 
 	native.format = C.int(settings.Format)
 	native.color = C.int(img.ColorSpace)
+
+	if img.ColorSpace == ICCRGB {
+		// OpenJPEG uses this for channel definitions; the ICC profile takes
+		// precedence over enumerated color when writing the JP2 color box.
+		native.color = C.OPJ_CLRSPC_SRGB
+	}
+
 	native.threads = C.int(settings.Threads)
 	native.reversible = 1
 
@@ -552,7 +564,7 @@ func encoderOptions(img *NativeImage, settings *Options) (C.cj_j2k_options, erro
 	native.codeblock_width = C.int(width)
 	native.codeblock_height = C.int(height)
 
-	if img.ColorSpace == SRGB && len(img.Components) >= 3 {
+	if (img.ColorSpace == SRGB || img.ColorSpace == ICCRGB) && len(img.Components) >= 3 {
 		native.mct = 1
 	}
 
@@ -582,7 +594,7 @@ func encoderOptions(img *NativeImage, settings *Options) (C.cj_j2k_options, erro
 func displayLayout(img *NativeImage) (int, int, int, int, int, error) {
 	failure := errors.New("jpeg2000: native samples require explicit color, alpha, signed, precision, or grid conversion")
 
-	if img == nil || len(img.Components) == 0 || img.ColorSpace != SRGB && img.ColorSpace != Gray {
+	if img == nil || len(img.Components) == 0 || img.ColorSpace != SRGB && img.ColorSpace != ICCRGB && img.ColorSpace != Gray {
 		return 0, 0, 0, 0, -1, failure
 	}
 

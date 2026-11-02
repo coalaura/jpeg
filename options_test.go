@@ -8,6 +8,7 @@ import (
 	"image/color"
 	stdjpeg "image/jpeg"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/coalaura/jpeg"
@@ -157,6 +158,106 @@ func TestProfilesAndBoxes(t *testing.T) {
 	display, err := jpeg2000.Decode(bytes.NewReader(encoded.Bytes()))
 	if err != nil || !reflect.DeepEqual(display, img) {
 		t.Fatalf("JP2 ICC display: %v", err)
+	}
+
+	// Retain the valid matrix profile, but replace its RGB transfer curves
+	// with gamma 1.0: these samples are linear RGB, not sRGB.
+	profile := bytes.Clone(source.OutputICC)
+	tags := int(binary.BigEndian.Uint32(profile[128:]))
+	curves := 0
+
+	for index := range tags {
+		entry := profile[132+index*12 : 144+index*12]
+		offset := int(binary.BigEndian.Uint32(entry[4:]))
+		size := int(binary.BigEndian.Uint32(entry[8:]))
+
+		switch string(entry[:4]) {
+		case "rTRC", "gTRC", "bTRC":
+			if size < 16 || offset+size > len(profile) {
+				t.Fatal("fixture profile has an invalid transfer curve")
+			}
+
+			clear(profile[offset : offset+size])
+			copy(profile[offset:], []byte{'c', 'u', 'r', 'v', 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0})
+			binary.BigEndian.PutUint32(entry[8:], 16)
+			curves++
+		case "cicp":
+			profile[offset+9] = 8 // Linear transfer characteristics.
+		}
+	}
+
+	if curves != 3 {
+		t.Fatal("fixture profile must have three RGB transfer curves")
+	}
+
+	clear(profile[84:100]) // An unset profile ID is valid after editing a profile.
+	associations := []int{0, 1, 2}
+
+	for _, association := range associations {
+		channels := 3
+
+		if association != 0 {
+			channels = 4
+		}
+
+		native := *jp2
+		native.ColorSpace = jpeg2000.ICCRGB
+		native.ICC = profile
+		native.Components = slices.Clone(jp2.Components[:channels])
+
+		if association != 0 {
+			native.Components[3].Alpha = association
+		}
+
+		encoded.Reset()
+
+		err = jpeg2000.EncodeNative(&encoded, &native, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		profiled, err := jpeg2000.DecodeNative(bytes.NewReader(encoded.Bytes()), nil)
+		if err != nil || profiled.ColorSpace != jpeg2000.ICCRGB || !bytes.Equal(profiled.ICC, profile) || !reflect.DeepEqual(profiled.Components, native.Components) {
+			t.Fatalf("linear RGB decode, alpha %d: %v", association, err)
+		}
+
+		encoded.Reset()
+
+		err = jpeg2000.EncodeNative(&encoded, profiled, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		roundtrip, err := jpeg2000.DecodeNative(bytes.NewReader(encoded.Bytes()), nil)
+		if err != nil || !reflect.DeepEqual(roundtrip, profiled) {
+			t.Fatalf("linear RGB roundtrip, alpha %d: %v", association, err)
+		}
+
+		if association == 2 {
+			continue
+		}
+
+		config, err := jpeg2000.DecodeConfig(bytes.NewReader(encoded.Bytes()))
+		if err != nil || config.ColorModel != color.NRGBA64Model || config.Width != img.Bounds().Dx() || config.Height != img.Bounds().Dy() {
+			t.Fatalf("linear RGB config, alpha %d: %+v %v", association, config, err)
+		}
+
+		display, err := jpeg2000.Decode(bytes.NewReader(encoded.Bytes()))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		for index := range native.Components[0].Values {
+			expected := color.NRGBA64{R: uint16(native.Components[0].Values[index]), G: uint16(native.Components[1].Values[index]), B: uint16(native.Components[2].Values[index]), A: 65535}
+
+			if association == 1 {
+				expected.A = uint16(native.Components[3].Values[index])
+			}
+
+			if display.At(index%config.Width, index/config.Width) != expected {
+				t.Fatalf("linear RGB display changed sample %d, alpha %d", index, association)
+			}
+		}
 	}
 }
 
@@ -490,6 +591,66 @@ func TestJP2PaletteConfig(t *testing.T) {
 
 	if decoded.ColorModel() != config.ColorModel || decoded.At(0, 0) != (color.NRGBA{R: 255, A: 255}) || decoded.At(1, 0) != (color.NRGBA{G: 255, A: 255}) {
 		t.Fatal("palette expansion differs from config or entries")
+	}
+
+	// Keep a valid header, but make the tile undecodable. The palette limit
+	// must take precedence over any error encountered while decoding pixels.
+	oversized := make([]byte, 0, len(palette)+512)
+	data = palette
+
+	for len(data) >= 8 {
+		length := int(binary.BigEndian.Uint32(data))
+		box := data[:length]
+		data = data[length:]
+
+		switch string(box[4:8]) {
+		case "jp2h":
+			header := make([]byte, 0, length+512)
+			children := box[8:]
+
+			for len(children) >= 8 {
+				childLength := int(binary.BigEndian.Uint32(children))
+				kind := string(children[4:8])
+
+				if kind != "pclr" && kind != "cmap" {
+					header = append(header, children[:childLength]...)
+				}
+
+				children = children[childLength:]
+			}
+
+			entries := make([]byte, 3+64*3)
+			copy(entries, []byte{0, 2, 64})
+			mapping := make([]byte, 0, 64*4)
+
+			for channel := range 64 {
+				entries[3+channel] = 7
+				mapping = append(mapping, 0, 0, 1, byte(channel))
+			}
+
+			header = appendJP2Box(header, "pclr", entries)
+			header = appendJP2Box(header, "cmap", mapping)
+			oversized = appendJP2Box(oversized, "jp2h", header)
+		case "jp2c":
+			tile := bytes.Index(box[8:], []byte{0xff, 0x90})
+			if tile < 0 {
+				t.Fatal("missing JPEG 2000 tile")
+			}
+
+			oversized = appendJP2Box(oversized, "jp2c", box[8:8+tile+2])
+		default:
+			oversized = append(oversized, box...)
+		}
+	}
+
+	_, err = jpeg2000.DecodeConfig(bytes.NewReader(oversized))
+	if err == nil || err.Error() != "jpeg2000: resource limit exceeded" {
+		t.Fatalf("oversized palette config must reject before tile decoding: %v", err)
+	}
+
+	_, err = jpeg2000.DecodeNative(bytes.NewReader(oversized), nil)
+	if err == nil || err.Error() != "jpeg2000: resource limit exceeded" {
+		t.Fatalf("oversized palette decode must reject before tile decoding: %v", err)
 	}
 }
 

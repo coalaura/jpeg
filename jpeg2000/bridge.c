@@ -1,6 +1,6 @@
 #include "bridge.h"
 
-extern OPJ_BOOL cj_jp2_header_config(opj_codec_t *codec, opj_image_t *image);
+extern OPJ_BOOL cj_jp2_header_config(opj_codec_t *codec, opj_image_t *image, OPJ_BOOL header_only, OPJ_UINT32 max_components, OPJ_UINT64 max_bytes);
 
 typedef struct {
 	const unsigned char *input;
@@ -109,12 +109,11 @@ int cj_j2k_decode(const unsigned char *data, size_t size, int header_only, uint6
 	if (!opj_setup_decoder(codec, &parameters) || !opj_codec_set_threads(codec, options->threads)) goto cleanup;
 	if (!opj_read_header(stream, codec, &result->image) || !cj_j2k_check_image(result, max_pixels)) goto cleanup;
 	if (options->has_region && !opj_set_decode_area(codec, result->image, options->region[0], options->region[1], options->region[2], options->region[3])) goto cleanup;
+	if (!options->format && !cj_jp2_header_config(codec, result->image, header_only, 16, 512u << 20)) goto cleanup;
 	if (!header_only) {
 		if (!opj_decode(codec, stream, result->image) || !opj_end_decompress(codec, stream)) goto cleanup;
-		if (!cj_j2k_check_image(result, max_pixels)) goto cleanup;
-	} else if (!options->format) {
-		if (!cj_jp2_header_config(codec, result->image) || !cj_j2k_check_image(result, max_pixels)) goto cleanup;
 	}
+	if (!cj_j2k_check_image(result, max_pixels)) goto cleanup;
 	success = 1;
 cleanup:
 	if (!success && !result->base.error[0]) cj_fail(&result->base, "invalid JPEG 2000 stream");

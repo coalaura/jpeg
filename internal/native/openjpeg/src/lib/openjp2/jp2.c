@@ -3423,14 +3423,41 @@ static int write_fidx(int offset_jp2c, int length_jp2c, int offset_idx,
 #endif
 #endif /* USE_JPIP */
 
-/* Apply the same validated JP2 channel mapping as decoding, without allocating
- * or reconstructing pixels. This entry point is private to the Go bridge. */
-OPJ_BOOL cj_jp2_header_config(opj_codec_t *codec, opj_image_t *image) {
+/* Preflight the decoded layout without allocating samples or changing decoder
+ * mapping state. Only header-only callers apply the projected layout. */
+OPJ_BOOL cj_jp2_header_config(opj_codec_t *codec, opj_image_t *image, OPJ_BOOL header_only, OPJ_UINT32 max_components, OPJ_UINT64 max_bytes) {
 	opj_codec_private_t *private_codec = (opj_codec_private_t *)codec;
 	opj_jp2_t *jp2 = (opj_jp2_t *)private_codec->m_codec;
 	opj_event_mgr_t *manager = &private_codec->m_event_mgr;
-	if (!opj_jp2_check_color(image, &jp2->color, manager)) return OPJ_FALSE;
-	opj_jp2_pclr_t *palette = jp2->color.jp2_pclr;
+	opj_jp2_color_t color = jp2->color;
+	opj_jp2_pclr_t palette_copy;
+	opj_jp2_cmap_comp_t mappings[256];
+	opj_jp2_pclr_t *palette = color.jp2_pclr;
+	if (palette && palette->cmap) {
+		/* NC is an eight-bit field. The validator may repair cmap in place. */
+		palette_copy = *palette;
+		memcpy(mappings, palette->cmap, palette->nr_channels * sizeof(*mappings));
+		palette_copy.cmap = mappings;
+		color.jp2_pclr = palette = &palette_copy;
+	}
+	if (!opj_jp2_check_color(image, &color, manager)) return OPJ_FALSE;
+	OPJ_UINT32 channels = palette && palette->cmap ? palette->nr_channels : image->numcomps;
+	if (!channels || channels > max_components) {
+		opj_event_msg(manager, EVT_ERROR, "resource limit exceeded");
+		return OPJ_FALSE;
+	}
+	OPJ_UINT64 remaining = max_bytes;
+	for (OPJ_UINT32 channel = 0; channel < channels; ++channel) {
+		OPJ_UINT32 source = palette && palette->cmap ? palette->cmap[channel].cmp : channel;
+		const opj_image_comp_t *component = &image->comps[source];
+		OPJ_UINT64 count = (OPJ_UINT64)component->w * component->h;
+		if (count > remaining / sizeof(OPJ_INT32)) {
+			opj_event_msg(manager, EVT_ERROR, "resource limit exceeded");
+			return OPJ_FALSE;
+		}
+		remaining -= count * sizeof(OPJ_INT32);
+	}
+	if (!header_only) return OPJ_TRUE;
 	if (palette && palette->cmap) {
 		opj_image_comp_t *components = opj_calloc(palette->nr_channels, sizeof(*components));
 		if (!components) return OPJ_FALSE;
