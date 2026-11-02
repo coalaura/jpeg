@@ -1,0 +1,8 @@
+turbo https://github.com/libjpeg-turbo/libjpeg-turbo 7b4993786d856cbccabfc0ed2f923ba000e326cc
+simde https://github.com/simd-everywhere/simde 71fd833d9666141edcd1d3c109a80e228303d8d7
+openjpeg https://github.com/uclouvain/openjpeg 6c4a29b00211eb0430fa0e5e890f1ce5c80f409f
+charls https://github.com/team-charls/charls 36dd3307e070d8fbc765c3ba890b7e681046fa39
+libjxl https://github.com/libjxl/libjxl 794a5dcf0d54f9f0b20d288a12e87afb91d20dfc
+highway https://github.com/google/highway 457c891775a7397bdb0376bb1031e6e027af1c48
+brotli https://github.com/google/brotli 36533a866ed1ca4b75cf049f4521e4ec5fe24727
+lcms https://github.com/mm2/Little-CMS 5176347635785e53ee5cee92328f76fda766ecc6
