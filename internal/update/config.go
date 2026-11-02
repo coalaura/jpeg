@@ -74,3 +74,47 @@ const jxlFastLosslessMinGWConfig = `// This encoder has its own SIMD dispatch, i
 #endif
 
 `
+
+const openjpegCoefficientCheck = `		/* Tier 1 reserves six fractional bits and a sign bit. Reject coefficients
+		 * that would be truncated by its left shift, before emitting tile data. */
+		for (OPJ_UINT32 component = 0; component < p_tcd->image->numcomps; ++component) {
+			if (p_tcd->tcp->tccps[component].qmfbid != 1) continue;
+			opj_tcd_tilecomp_t *tile = &p_tcd->tcd_image->tiles->comps[component];
+			size_t count = (size_t)(tile->x1 - tile->x0) * (tile->y1 - tile->y0);
+			for (size_t sample = 0; sample < count; ++sample) {
+				if (tile->data[sample] < -33554431 || tile->data[sample] > 33554431) {
+					opj_event_msg(p_manager, EVT_ERROR, "Reversible coefficients exceed the exact 25-bit magnitude limit\n");
+					return OPJ_FALSE;
+				}
+			}
+		}
+
+`
+
+const openjpegHeaderConfig = `
+/* Apply the same validated JP2 channel mapping as decoding, without allocating
+ * or reconstructing pixels. This entry point is private to the Go bridge. */
+OPJ_BOOL cj_jp2_header_config(opj_codec_t *codec, opj_image_t *image) {
+	opj_codec_private_t *private_codec = (opj_codec_private_t *)codec;
+	opj_jp2_t *jp2 = (opj_jp2_t *)private_codec->m_codec;
+	opj_event_mgr_t *manager = &private_codec->m_event_mgr;
+	if (!opj_jp2_check_color(image, &jp2->color, manager)) return OPJ_FALSE;
+	opj_jp2_pclr_t *palette = jp2->color.jp2_pclr;
+	if (palette && palette->cmap) {
+		opj_image_comp_t *components = opj_calloc(palette->nr_channels, sizeof(*components));
+		if (!components) return OPJ_FALSE;
+		for (OPJ_UINT32 channel = 0; channel < palette->nr_channels; ++channel) {
+			opj_jp2_cmap_comp_t *mapping = &palette->cmap[channel];
+			components[channel] = image->comps[mapping->cmp];
+			components[channel].data = NULL;
+			components[channel].prec = palette->channel_size[channel];
+			components[channel].sgnd = palette->channel_sign[channel];
+		}
+		opj_free(image->comps);
+		image->comps = components;
+		image->numcomps = palette->nr_channels;
+	}
+	if (jp2->color.jp2_cdef) opj_jp2_apply_cdef(image, &jp2->color, manager);
+	return OPJ_TRUE;
+}
+`

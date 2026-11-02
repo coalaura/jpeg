@@ -91,6 +91,15 @@ static int cj_xl_settings(cj_xl_encoder *state, cj_result *result) {
 	ENC(JxlEncoderSetFrameLossless(state->settings, options.lossless));
 	// Invisible RGB samples are part of exact lossless pixel preservation.
 	if (options.lossless) ENC(JxlEncoderFrameSettingsSetOption(state->settings, JXL_ENC_FRAME_SETTING_KEEP_INVISIBLE, 1));
+	// Float bit patterns can span the whole int32 range; prediction differences
+	// and reversible color transforms can overflow libjxl's modular residuals.
+	if (options.lossless && options.exponent_bits) {
+		// Efforts 1-3 use a fixed tree that ignores the requested predictor.
+		if (options.effort < 4) ENC(JxlEncoderFrameSettingsSetOption(state->settings, JXL_ENC_FRAME_SETTING_EFFORT, 4));
+		ENC(JxlEncoderFrameSettingsSetOption(state->settings, JXL_ENC_FRAME_SETTING_MODULAR_PREDICTOR, 0));
+		ENC(JxlEncoderFrameSettingsSetFloatOption(state->settings, JXL_ENC_FRAME_SETTING_MODULAR_MA_TREE_LEARNING_PERCENT, 0));
+		ENC(JxlEncoderFrameSettingsSetOption(state->settings, JXL_ENC_FRAME_SETTING_MODULAR_COLOR_SPACE, 0));
+	}
 	for (int index = 0; index < options.setting_count; ++index) {
 		ENC(JxlEncoderFrameSettingsSetOption(state->settings, static_cast<JxlEncoderFrameSettingId>(options.setting_ids[index]), options.setting_values[index]));
 	}
@@ -121,6 +130,14 @@ cj_xl_encoder *cj_xl_encoder_create(uint32_t width, uint32_t height, const cj_xl
 		info.animation.num_loops = options->loops;
 		info.animation.have_timecodes = options->have_animation;
 		if (JxlEncoderSetBasicInfo(state->encoder, &info) != JXL_ENC_SUCCESS) { cj_fail(result, "invalid basic image info"); return nullptr; }
+		if (info.num_extra_channels) {
+			JxlExtraChannelInfo alpha;
+			JxlEncoderInitExtraChannelInfo(JXL_CHANNEL_ALPHA, &alpha);
+			alpha.bits_per_sample = info.alpha_bits;
+			alpha.exponent_bits_per_sample = info.alpha_exponent_bits;
+			alpha.alpha_premultiplied = options->premultiplied;
+			if (JxlEncoderSetExtraChannelInfo(state->encoder, 0, &alpha) != JXL_ENC_SUCCESS) { cj_fail(result, "invalid alpha channel info"); return nullptr; }
+		}
 		if (icc_size) {
 			if (JxlEncoderSetICCProfile(state->encoder, icc, icc_size) != JXL_ENC_SUCCESS) { cj_fail(result, "invalid ICC profile"); return nullptr; }
 		} else {
@@ -178,7 +195,10 @@ int cj_xl_encoder_finish(cj_xl_encoder *state, cj_result *result) {
 			size_t available = capacity - result->size;
 			auto status = JxlEncoderProcessOutput(state->encoder, &next, &available);
 			result->size = capacity - available;
-			if (status == JXL_ENC_SUCCESS) return 1;
+			if (status == JXL_ENC_SUCCESS) {
+				if (!state->options.container && (result->size < 2 || result->data[0] != 0xff || result->data[1] != 0x0a)) return cj_fail(result, "requested raw JPEG XL codestream requires a container for these encoding options");
+				return 1;
+			}
 			if (status != JXL_ENC_NEED_MORE_OUTPUT) return cj_fail(result, "JPEG XL encoding failed");
 			if (capacity >= (512u << 20)) return cj_fail(result, "encoded output limit exceeded");
 			capacity *= 2;

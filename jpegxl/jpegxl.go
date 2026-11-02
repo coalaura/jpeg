@@ -63,7 +63,7 @@ const (
 
 // SettingID identifies an advanced libjxl integer encoder control. Most use -1
 // for the backend default and 0/1 for off/on; invalid values are rejected by
-// libjxl. These names and values follow libjxl 0.11.1's public encoder API.
+// libjxl. These names and values follow libjxl 0.12.0's public encoder API.
 type SettingID int
 
 type Setting struct {
@@ -72,7 +72,7 @@ type Setting struct {
 }
 
 // Options controls encoding. Nil uses distance 1, effort 7, one native worker,
-// 8-bit samples and a raw codestream. Lossless explicitly enables exact coding;
+// source precision and a raw codestream. Lossless explicitly enables exact coding;
 // Distance=0 alone does not promise exact samples. AlphaDistance defaults to 0.
 type Options struct {
 	Lossless        bool
@@ -81,8 +81,8 @@ type Options struct {
 	Effort          int      // 1..10; zero means 7.
 	DecodingSpeed   int      // 0..4, trading compression for decoding speed.
 	Threads         int      // 1..16; zero means 1.
-	BitsPerSample   int      // 2..16 for image.Image; zero means 8.
-	Container       bool     // false writes a raw codestream; metadata requires true.
+	BitsPerSample   int      // 2..16 for image.Image; zero retains 16-bit Go images, otherwise 8.
+	Container       bool     // false requires a raw codestream; metadata and level 10 require true.
 	ICC             []byte   // At most 4 MiB; nil means sRGB (linear sRGB if Linear is true).
 	Linear          bool
 	IntensityTarget float32 // Nits; zero selects the backend's profile default.
@@ -165,7 +165,11 @@ type Animation struct {
 // unsigned samples. Floating point and premultiplied samples require an
 // explicit conversion by the caller. ICC color conversion is not performed.
 func (samples *Samples) Image() (image.Image, error) {
-	err := samples.validate()
+	return samples.image(0)
+}
+
+func (samples *Samples) image(maxPixels uint64) (image.Image, error) {
+	err := samples.validate(maxPixels)
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +179,7 @@ func (samples *Samples) Image() (image.Image, error) {
 	}
 
 	if samples.Channels != 2 {
-		return pixels.Image(samples.Unsigned, samples.Width, samples.Height, samples.Channels, samples.BitsPerSample)
+		return pixels.Image(samples.Unsigned, samples.Width, samples.Height, samples.Channels, samples.BitsPerSample, maxPixels)
 	}
 
 	values := make([]uint16, samples.Width*samples.Height*4)
@@ -188,15 +192,15 @@ func (samples *Samples) Image() (image.Image, error) {
 		values[index*4+3] = samples.Unsigned[index*2+1]
 	}
 
-	return pixels.Image(values, samples.Width, samples.Height, 4, samples.BitsPerSample)
+	return pixels.Image(values, samples.Width, samples.Height, 4, samples.BitsPerSample, maxPixels)
 }
 
-func (samples *Samples) validate() error {
+func (samples *Samples) validate(maxPixels uint64) error {
 	if samples == nil {
 		return errors.New("jpegxl: nil samples")
 	}
 
-	err := pixels.Check(samples.Width, samples.Height, samples.Channels, 0)
+	err := pixels.Check(samples.Width, samples.Height, samples.Channels, maxPixels)
 	if err != nil {
 		return err
 	}
@@ -249,7 +253,13 @@ func DecodeWithOptions(reader io.Reader, options *DecodeOptions) (image.Image, e
 		return nil, err
 	}
 
-	return animation.Frames[0].Samples.Image()
+	maxPixels := uint64(0)
+
+	if options != nil {
+		maxPixels = options.MaxPixels
+	}
+
+	return animation.Frames[0].Samples.image(maxPixels)
 }
 
 func DecodeConfig(reader io.Reader) (image.Config, error) {
@@ -554,12 +564,12 @@ func frameSamples(frame *Frame, options *Options) (*Samples, error) {
 			return nil, errors.New("jpegxl: specify samples or image, not both")
 		}
 
-		return frame.Samples, frame.Samples.validate()
+		return frame.Samples, frame.Samples.validate(0)
 	}
 
 	bits := options.BitsPerSample
 	if bits == 0 {
-		bits = 8
+		bits = pixels.Precision(frame.Image)
 	}
 
 	values, channels, err := pixels.Extract(frame.Image, bits, true)

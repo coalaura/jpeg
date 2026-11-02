@@ -1,5 +1,7 @@
 #include "bridge.h"
 
+extern OPJ_BOOL cj_jp2_header_config(opj_codec_t *codec, opj_image_t *image);
+
 typedef struct {
 	const unsigned char *input;
 	unsigned char *output;
@@ -110,6 +112,8 @@ int cj_j2k_decode(const unsigned char *data, size_t size, int header_only, uint6
 	if (!header_only) {
 		if (!opj_decode(codec, stream, result->image) || !opj_end_decompress(codec, stream)) goto cleanup;
 		if (!cj_j2k_check_image(result, max_pixels)) goto cleanup;
+	} else if (!options->format) {
+		if (!cj_jp2_header_config(codec, result->image) || !cj_j2k_check_image(result, max_pixels)) goto cleanup;
 	}
 	success = 1;
 cleanup:

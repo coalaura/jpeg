@@ -62,7 +62,7 @@ func main() {
 	consumer := filepath.Join(root, ".cache", "consumer")
 	must(os.MkdirAll(consumer, 0o755))
 
-	write(filepath.Join(consumer, "go.mod"), []byte("module consumer\n\ngo 1.27.3\n\nrequire "+module+" "+version+"\n"))
+	write(filepath.Join(consumer, "go.mod"), []byte("module consumer\n\ngo 1.26\n\nrequire "+module+" "+version+"\n"))
 
 	err = os.Remove(filepath.Join(consumer, "go.sum"))
 	if err != nil && !os.IsNotExist(err) {

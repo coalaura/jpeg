@@ -37,40 +37,40 @@ type Transform int
 
 // Preset overrides the JPEG-LS coding parameters. Nil uses ISO defaults.
 type Preset struct {
-	Maximum int
+	Maximum    int
 	Threshold1 int
 	Threshold2 int
 	Threshold3 int
-	Reset int
+	Reset      int
 }
 
-// Options controls encoding. Nil is 8-bit, exact lossless, sample-interleaved
+// Options controls encoding. Nil preserves source precision with exact lossless, sample-interleaved
 // color or planar grayscale. NEAR=0 means exact lossless, never a quality preset.
 type Options struct {
-	BitsPerSample int // Zero selects 8. Native sample encoding uses Samples.BitsPerSample.
-	NEAR int // 0..min(255, maximum/2), in native sample units.
-	Interleave *Interleave // Nil selects Sample for color and Planar for grayscale.
-	Transform Transform // HP transforms require three 8/16-bit components and NEAR=0.
-	Preset *Preset
-	RGBA bool // Explicitly store four components as straight RGBA; this is not file metadata.
+	BitsPerSample int         // Zero retains 16-bit Go images; otherwise 8. Native encoding uses Samples.BitsPerSample.
+	NEAR          int         // 0..min(255, maximum/2), in native sample units.
+	Interleave    *Interleave // Nil selects Sample for color and Planar for grayscale.
+	Transform     Transform   // HP transforms require three 8/16-bit components and NEAR=0.
+	Preset        *Preset
+	RGBA          bool // Explicitly store four components as straight RGBA; this is not file metadata.
 }
 
 type DecodeOptions struct {
-	RGBA bool // Interpret four components as straight RGBA by caller agreement.
-	MaxPixels uint64 // Zero selects 16 million pixels.
-	MaxInputBytes int64 // Zero selects 64 MiB; maximum 512 MiB.
+	RGBA          bool   // Interpret four components as straight RGBA by caller agreement.
+	MaxPixels     uint64 // Zero selects 16 million pixels.
+	MaxInputBytes int64  // Zero selects 64 MiB; maximum 512 MiB.
 }
 
 // Samples stores pixel-interleaved values, irrespective of file interleave mode.
 // Components have no implicit color semantics. Precision is 2..16 bits.
 type Samples struct {
-	Width int
-	Height int
-	Components int
+	Width         int
+	Height        int
+	Components    int
 	BitsPerSample int
-	Values []uint16
-	Interleave Interleave
-	NEAR []int // Decoder-reported error bound for each component.
+	Values        []uint16
+	Interleave    Interleave
+	NEAR          []int // Decoder-reported error bound for each component.
 }
 
 func Decode(reader io.Reader) (image.Image, error) {
@@ -87,7 +87,13 @@ func DecodeWithOptions(reader io.Reader, options *DecodeOptions) (image.Image, e
 		return nil, errors.New("jpegls: four components require explicit RGBA interpretation or DecodeSamples")
 	}
 
-	return pixels.Image(samples.Values, samples.Width, samples.Height, samples.Components, samples.BitsPerSample)
+	maxPixels := uint64(0)
+
+	if options != nil {
+		maxPixels = options.MaxPixels
+	}
+
+	return pixels.Image(samples.Values, samples.Width, samples.Height, samples.Components, samples.BitsPerSample, maxPixels)
 }
 
 func DecodeConfig(reader io.Reader) (image.Config, error) {
@@ -119,7 +125,7 @@ func Encode(writer io.Writer, img image.Image, options *Options) error {
 	}
 
 	if settings.BitsPerSample == 0 {
-		settings.BitsPerSample = 8
+		settings.BitsPerSample = pixels.Precision(img)
 	}
 
 	values, components, err := pixels.Extract(img, settings.BitsPerSample, settings.RGBA)
@@ -225,8 +231,8 @@ func decode(reader io.Reader, options *DecodeOptions, header bool) (*Samples, er
 	}
 
 	var (
-		result C.cj_result
-		native C.cj_ls_options
+		result     C.cj_result
+		native     C.cj_ls_options
 		headerOnly C.int
 	)
 
@@ -249,8 +255,92 @@ func decode(reader io.Reader, options *DecodeOptions, header bool) (*Samples, er
 	}
 
 	if !header {
+		err = scanErrorBounds(data, samples.NEAR)
+		if err != nil {
+			return nil, err
+		}
+
 		samples.Values = slices.Clone(unsafe.Slice((*uint16)(unsafe.Pointer(result.samples)), samples.Width*samples.Height*samples.Components))
 	}
 
 	return samples, nil
+}
+
+// CharLS 2.4 ignores the component argument to get_near_lossless. Read scan
+// headers after native validation, respecting JPEG-LS's seven-bit stuffing.
+func scanErrorBounds(data []byte, bounds []int) error {
+	var components [256]int
+
+	for index := range bounds {
+		bounds[index] = -1
+	}
+
+	for offset := 0; offset+1 < len(data); {
+		if data[offset] != 0xff || data[offset+1] < 0x80 {
+			offset++
+
+			continue
+		}
+
+		marker := data[offset+1]
+		offset++
+
+		if marker == 0xff {
+			continue
+		}
+
+		offset++
+
+		if marker == 0xd9 {
+			break
+		}
+
+		if marker == 0xd8 || marker >= 0xd0 && marker <= 0xd7 {
+			continue
+		}
+
+		if offset+2 > len(data) {
+			return errors.New("jpegls: truncated marker length")
+		}
+
+		length := int(data[offset])<<8 | int(data[offset+1])
+		if length < 2 || length > len(data)-offset {
+			return errors.New("jpegls: invalid marker length")
+		}
+
+		payload := data[offset+2 : offset+length]
+		offset += length
+
+		switch marker {
+		case 0xf7:
+			if len(payload) < 6 || int(payload[5]) != len(bounds) || len(payload) != 6+3*len(bounds) {
+				return errors.New("jpegls: invalid frame component table")
+			}
+
+			for index := range bounds {
+				components[payload[6+3*index]] = index + 1
+			}
+		case 0xda:
+			if len(payload) < 4 || len(payload) != 4+2*int(payload[0]) {
+				return errors.New("jpegls: invalid scan component table")
+			}
+
+			for index := range int(payload[0]) {
+				component := components[payload[1+2*index]] - 1
+				if component < 0 || bounds[component] != -1 {
+					return errors.New("jpegls: invalid scan component")
+				}
+
+				bounds[component] = int(payload[1+2*int(payload[0])])
+			}
+		}
+	}
+
+	for _, bound := range bounds {
+		if bound < 0 {
+			return errors.New("jpegls: missing scan component")
+		}
+	}
+
+	return nil
 }

@@ -2019,12 +2019,12 @@ OPJ_BOOL opj_jp2_setup_encoder(opj_jp2_t *jp2,
         }
     }
     if (alpha_count == 1U) { /* no way to deal with more than 1 alpha channel */
-        switch (jp2->enumcs) {
-        case 16:
-        case 18:
+        switch (image->color_space) {
+        case OPJ_CLRSPC_SRGB:
+        case OPJ_CLRSPC_SYCC:
             color_channels = 3;
             break;
-        case 17:
+        case OPJ_CLRSPC_GRAY:
             color_channels = 1;
             break;
         default:
@@ -2077,7 +2077,7 @@ OPJ_BOOL opj_jp2_setup_encoder(opj_jp2_t *jp2,
             if (image->comps[i].alpha != 0) { /* we'll be here exactly once */
                 jp2->color.jp2_cdef->info[i].cn = (OPJ_UINT16)
                                                   i; /* cast is valid : image->numcomps [1,16384] */
-                jp2->color.jp2_cdef->info[i].typ = 1U; /* Opacity channel */
+                jp2->color.jp2_cdef->info[i].typ = image->comps[i].alpha; /* Preserve opacity association. */
                 jp2->color.jp2_cdef->info[i].asoc =
                     0U; /* Apply alpha channel to the whole image */
             } else {
@@ -3422,3 +3422,29 @@ static int write_fidx(int offset_jp2c, int length_jp2c, int offset_idx,
 }
 #endif
 #endif /* USE_JPIP */
+
+/* Apply the same validated JP2 channel mapping as decoding, without allocating
+ * or reconstructing pixels. This entry point is private to the Go bridge. */
+OPJ_BOOL cj_jp2_header_config(opj_codec_t *codec, opj_image_t *image) {
+	opj_codec_private_t *private_codec = (opj_codec_private_t *)codec;
+	opj_jp2_t *jp2 = (opj_jp2_t *)private_codec->m_codec;
+	opj_event_mgr_t *manager = &private_codec->m_event_mgr;
+	if (!opj_jp2_check_color(image, &jp2->color, manager)) return OPJ_FALSE;
+	opj_jp2_pclr_t *palette = jp2->color.jp2_pclr;
+	if (palette && palette->cmap) {
+		opj_image_comp_t *components = opj_calloc(palette->nr_channels, sizeof(*components));
+		if (!components) return OPJ_FALSE;
+		for (OPJ_UINT32 channel = 0; channel < palette->nr_channels; ++channel) {
+			opj_jp2_cmap_comp_t *mapping = &palette->cmap[channel];
+			components[channel] = image->comps[mapping->cmp];
+			components[channel].data = NULL;
+			components[channel].prec = palette->channel_size[channel];
+			components[channel].sgnd = palette->channel_sign[channel];
+		}
+		opj_free(image->comps);
+		image->comps = components;
+		image->numcomps = palette->nr_channels;
+	}
+	if (jp2->color.jp2_cdef) opj_jp2_apply_cdef(image, &jp2->color, manager);
+	return OPJ_TRUE;
+}

@@ -2,15 +2,19 @@ package jpeg_test
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"image"
+	"image/color"
 	stdjpeg "image/jpeg"
 	"reflect"
 	"testing"
 
+	"github.com/coalaura/jpeg"
 	"github.com/coalaura/jpeg/classic"
 	"github.com/coalaura/jpeg/internal/pixels"
 	"github.com/coalaura/jpeg/jpeg2000"
+	"github.com/coalaura/jpeg/jpegls"
 	"github.com/coalaura/jpeg/jpegxl"
 )
 
@@ -38,7 +42,7 @@ func TestClassicPrecisionAndCMYK(t *testing.T) {
 		samples := classic.Samples{Width: 8, Height: 8, BitsPerSample: 8, ColorSpace: classic.CMYK, Values: make([]uint16, 8*8*4)}
 
 		for index := range samples.Values {
-			samples.Values[index] = uint16(index%4 * 50)
+			samples.Values[index] = uint16(index % 4 * 50)
 		}
 
 		var encoded bytes.Buffer
@@ -141,8 +145,18 @@ func TestProfilesAndBoxes(t *testing.T) {
 	}
 
 	jp2, err := jpeg2000.DecodeNative(bytes.NewReader(encoded.Bytes()), nil)
-	if err != nil || !bytes.Equal(jp2.ICC, source.OutputICC) {
+	if err != nil || !bytes.Equal(jp2.ICC, source.OutputICC) || jp2.Components[3].Alpha != 1 {
 		t.Fatalf("JP2 ICC: %v", err)
+	}
+
+	config, err := jpeg2000.DecodeConfig(bytes.NewReader(encoded.Bytes()))
+	if err != nil || config.ColorModel != color.NRGBA64Model || config.Width != img.Bounds().Dx() || config.Height != img.Bounds().Dy() {
+		t.Fatalf("JP2 ICC config: %+v %v", config, err)
+	}
+
+	display, err := jpeg2000.Decode(bytes.NewReader(encoded.Bytes()))
+	if err != nil || !reflect.DeepEqual(display, img) {
+		t.Fatalf("JP2 ICC display: %v", err)
 	}
 }
 
@@ -177,4 +191,354 @@ func TestJPEGXLResourceAndLosslessOptions(t *testing.T) {
 	if err == nil {
 		t.Fatal("invalid native memory limit accepted")
 	}
+}
+
+func TestJP2ReversiblePrecision(t *testing.T) {
+	signs := []bool{false, true}
+	levels := []int{1, 5}
+	transforms := []bool{false, true}
+	precisions := []int{24, 25, 27}
+
+	for _, signed := range signs {
+		for _, resolutions := range levels {
+			for _, transform := range transforms {
+				for _, precision := range precisions {
+					native := jpeg2000.NativeImage{Bounds: image.Rect(0, 0, 16, 16), ColorSpace: jpeg2000.SRGB, Components: make([]jpeg2000.Component, 3)}
+					maximum := int32(1<<precision - 1)
+
+					for channel := range native.Components {
+						component := &native.Components[channel]
+						*component = jpeg2000.Component{Width: 16, Height: 16, DX: 1, DY: 1, BitsPerSample: precision, Signed: signed, Values: make([]int32, 256)}
+
+						for index := range component.Values {
+							component.Values[index] = int32(int64(index) * int64(maximum) / 255)
+
+							if signed {
+								component.Values[index] -= 1 << (precision - 1)
+							}
+						}
+					}
+
+					var encoded bytes.Buffer
+
+					err := jpeg2000.EncodeNative(&encoded, &native, &jpeg2000.Options{Resolutions: resolutions, MultiComponentTransform: new(transform)})
+
+					if precision > 25 {
+						if err == nil || encoded.Len() != 0 {
+							t.Fatalf("%d-bit reversible input accepted: %v", precision, err)
+						}
+
+						continue
+					}
+
+					if err != nil {
+						t.Fatalf("precision=%d signed=%v resolutions=%d transform=%v: %v", precision, signed, resolutions, transform, err)
+					}
+
+					decoded, err := jpeg2000.DecodeNative(bytes.NewReader(encoded.Bytes()), nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+
+					for channel := range native.Components {
+						if !reflect.DeepEqual(native.Components[channel].Values, decoded.Components[channel].Values) {
+							t.Fatalf("inexact precision=%d signed=%v resolutions=%d transform=%v channel=%d", precision, signed, resolutions, transform, channel)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// The reported unsigned 27-bit grayscale ramp must fail before output.
+	native := jpeg2000.NativeImage{Bounds: image.Rect(0, 0, 16, 16), ColorSpace: jpeg2000.Gray, Components: []jpeg2000.Component{{Width: 16, Height: 16, DX: 1, DY: 1, BitsPerSample: 27, Values: make([]int32, 256)}}}
+
+	for index := range native.Components[0].Values {
+		native.Components[0].Values[index] = int32(int64(index) * ((1 << 27) - 1) / 255)
+	}
+
+	var encoded bytes.Buffer
+
+	err := jpeg2000.EncodeNative(&encoded, &native, nil)
+	if err == nil || encoded.Len() != 0 {
+		t.Fatalf("27-bit grayscale ramp: %v", err)
+	}
+
+	// High-frequency data can exceed Tier 1's coefficient range after the
+	// reversible transforms, even when the input precision itself is supported.
+	native.ColorSpace = jpeg2000.SRGB
+	native.Components = make([]jpeg2000.Component, 3)
+
+	for channel := range native.Components {
+		component := &native.Components[channel]
+		*component = jpeg2000.Component{Width: 16, Height: 16, DX: 1, DY: 1, BitsPerSample: 25, Values: make([]int32, 256)}
+
+		for index := range component.Values {
+			if (index%16+index/16+channel)%2 != 0 {
+				component.Values[index] = 1<<25 - 1
+			}
+		}
+	}
+
+	err = jpeg2000.EncodeNative(&encoded, &native, nil)
+	if err == nil || encoded.Len() != 0 {
+		t.Fatalf("out-of-range reversible coefficients: %v", err)
+	}
+}
+
+func TestNativeAlphaAssociation(t *testing.T) {
+	values := []uint16{64, 0, 0, 128}
+	native := jpeg2000.NativeImage{Bounds: image.Rect(0, 0, 1, 1), ColorSpace: jpeg2000.SRGB, Components: make([]jpeg2000.Component, 4)}
+
+	for channel, value := range values {
+		native.Components[channel] = jpeg2000.Component{Width: 1, Height: 1, DX: 1, DY: 1, BitsPerSample: 8, Values: []int32{int32(value)}}
+	}
+
+	native.Components[3].Alpha = 2
+
+	var encoded bytes.Buffer
+
+	err := jpeg2000.EncodeNative(&encoded, &native, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	decoded, err := jpeg2000.DecodeNative(bytes.NewReader(encoded.Bytes()), nil)
+	if err != nil || decoded.Components[3].Alpha != 2 {
+		t.Fatalf("JP2 associated alpha: %v", err)
+	}
+
+	for channel, value := range values {
+		if decoded.Components[channel].Values[0] != int32(value) {
+			t.Fatalf("JP2 channel %d changed", channel)
+		}
+	}
+
+	encoded.Reset()
+
+	samples := jpegxl.Samples{Width: 1, Height: 1, Channels: 4, BitsPerSample: 8, PremultipliedAlpha: true, Unsigned: values}
+
+	err = jpegxl.EncodeSamples(&encoded, &samples, &jpegxl.Options{Lossless: true, Effort: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	animation, err := jpegxl.DecodeAnimation(bytes.NewReader(encoded.Bytes()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	actual := animation.Frames[0].Samples
+	if !actual.PremultipliedAlpha || !reflect.DeepEqual(actual.Unsigned, values) {
+		t.Fatalf("JXL associated alpha: %+v", actual)
+	}
+}
+
+func TestDefaultLosslessPrecision(t *testing.T) {
+	gray := image.NewGray16(image.Rect(0, 0, 2, 2))
+	gray.SetGray16(0, 0, color.Gray16{Y: 32769})
+
+	rgba := image.NewRGBA64(gray.Bounds())
+	rgba.SetRGBA64(0, 0, color.RGBA64{R: 32769, A: 65535})
+
+	nrgba := image.NewNRGBA64(gray.Bounds())
+	nrgba.SetNRGBA64(0, 0, color.NRGBA64{R: 32769, A: 65535})
+
+	images := []image.Image{gray, rgba, nrgba}
+	precisions := []int{0, 8}
+
+	for _, precision := range precisions {
+		formats := []jpeg.Options{
+			{Format: jpeg.JP2, JPEG2000: &jpeg2000.Options{BitsPerSample: precision}},
+			{Format: jpeg.JPEGLS, JPEGLS: &jpegls.Options{BitsPerSample: precision, RGBA: true}},
+			{Format: jpeg.JXLContainer, JPEGXL: &jpegxl.Options{BitsPerSample: precision, Lossless: true, Effort: 1}},
+		}
+
+		for index := range formats {
+			for _, img := range images {
+				var encoded bytes.Buffer
+
+				err := jpeg.Encode(&encoded, img, &formats[index])
+				if err != nil {
+					t.Fatalf("%s %T precision=%d: %v", formats[index].Format, img, precision, err)
+				}
+
+				decoded, err := jpeg.DecodeWithOptions(bytes.NewReader(encoded.Bytes()), &jpeg.DecodeOptions{JPEGLS: &jpegls.DecodeOptions{RGBA: true}})
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				red, _, _, _ := decoded.At(0, 0).RGBA()
+				expected := uint32(32769)
+
+				if precision == 8 {
+					expected = 128 * 257
+				}
+
+				if red != expected {
+					t.Fatalf("%s %T precision=%d: got %d want %d", formats[index].Format, img, precision, red, expected)
+				}
+			}
+		}
+	}
+}
+
+func TestExplicitJXLCodestream(t *testing.T) {
+	images := []image.Image{image.NewGray(image.Rect(0, 0, 2, 2)), image.NewGray16(image.Rect(0, 0, 2, 2))}
+
+	for _, img := range images {
+		var encoded bytes.Buffer
+
+		err := jpeg.Encode(&encoded, img, &jpeg.Options{Format: jpeg.JXLCodestream, JPEGXL: &jpegxl.Options{Lossless: true, Effort: 1}})
+		if err != nil {
+			if encoded.Len() != 0 {
+				t.Fatal("raw codestream error wrote output")
+			}
+
+			continue
+		}
+
+		if !bytes.HasPrefix(encoded.Bytes(), []byte{0xff, 0x0a}) {
+			t.Fatalf("%T produced a container", img)
+		}
+	}
+}
+
+func TestLargeJPEGMaxPixels(t *testing.T) {
+	img := image.NewGray(image.Rect(0, 0, 4097, 4096))
+
+	var encoded bytes.Buffer
+
+	err := stdjpeg.Encode(&encoded, img, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	options := &classic.DecodeOptions{MaxPixels: 20000000}
+
+	config, err := classic.DecodeConfigWithOptions(bytes.NewReader(encoded.Bytes()), options)
+	if err != nil || config.Width != 4097 || config.Height != 4096 {
+		t.Fatalf("large config: %+v %v", config, err)
+	}
+
+	decoded, err := classic.DecodeWithOptions(bytes.NewReader(encoded.Bytes()), options)
+	if err != nil || decoded.Bounds() != img.Bounds() {
+		t.Fatalf("large decode: %v", err)
+	}
+
+	options.MaxInputBytes = 1
+
+	_, err = classic.DecodeWithOptions(bytes.NewReader(encoded.Bytes()), options)
+	if !errors.Is(err, pixels.ErrLimit) {
+		t.Fatalf("independent input limit: %v", err)
+	}
+}
+
+func TestJP2PaletteConfig(t *testing.T) {
+	img := image.NewGray(image.Rect(0, 0, 2, 2))
+	copy(img.Pix, []byte{0, 1, 1, 0})
+
+	var encoded bytes.Buffer
+
+	err := jpeg2000.Encode(&encoded, img, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	palette := make([]byte, 0, encoded.Len()+64)
+	data := encoded.Bytes()
+
+	for len(data) >= 8 {
+		length := int(binary.BigEndian.Uint32(data))
+		box := data[:length]
+		data = data[length:]
+
+		if string(box[4:8]) != "jp2h" {
+			palette = append(palette, box...)
+
+			continue
+		}
+
+		header := make([]byte, 0, length+64)
+		children := box[8:]
+
+		for len(children) >= 8 {
+			childLength := int(binary.BigEndian.Uint32(children))
+
+			if string(children[4:8]) != "colr" {
+				header = append(header, children[:childLength]...)
+			}
+
+			children = children[childLength:]
+		}
+
+		header = appendJP2Box(header, "colr", []byte{1, 0, 0, 0, 0, 0, 16})
+		header = appendJP2Box(header, "pclr", []byte{0, 2, 3, 7, 7, 7, 255, 0, 0, 0, 255, 0})
+		header = appendJP2Box(header, "cmap", []byte{0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 2})
+		palette = appendJP2Box(palette, "jp2h", header)
+	}
+
+	config, err := jpeg2000.DecodeConfig(bytes.NewReader(palette))
+	if err != nil || config.Width != 2 || config.Height != 2 || config.ColorModel != color.NRGBAModel {
+		t.Fatalf("expanded palette config: %+v %v", config, err)
+	}
+
+	decoded, err := jpeg2000.Decode(bytes.NewReader(palette))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if decoded.ColorModel() != config.ColorModel || decoded.At(0, 0) != (color.NRGBA{R: 255, A: 255}) || decoded.At(1, 0) != (color.NRGBA{G: 255, A: 255}) {
+		t.Fatal("palette expansion differs from config or entries")
+	}
+}
+
+func TestJPEGLSScanErrorBounds(t *testing.T) {
+	var combined []byte
+
+	bounds := []int{0, 1, 3}
+
+	for index, bound := range bounds {
+		samples := jpegls.Samples{Width: 2, Height: 2, Components: 1, BitsPerSample: 8, Values: []uint16{0, 64, 128, 255}}
+
+		var encoded bytes.Buffer
+
+		err := jpegls.EncodeSamples(&encoded, &samples, &jpegls.Options{NEAR: bound})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		data := encoded.Bytes()
+
+		frame := bytes.Index(data, []byte{0xff, 0xf7})
+		scan := bytes.Index(data, []byte{0xff, 0xda})
+
+		if frame < 0 || scan < 0 {
+			t.Fatal("missing JPEG-LS frame/scan")
+		}
+
+		if index == 0 {
+			combined = append(combined, data[:frame+2]...)
+			combined = append(combined, 0, 17)
+			combined = append(combined, data[frame+4:frame+9]...)
+			combined = append(combined, 3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0)
+		}
+
+		data[scan+5] = byte(index + 1)
+		combined = append(combined, data[scan:len(data)-2]...)
+	}
+
+	combined = append(combined, 0xff, 0xd9)
+
+	decoded, err := jpegls.DecodeSamples(bytes.NewReader(combined), nil)
+	if err != nil || !reflect.DeepEqual(decoded.NEAR, bounds) {
+		t.Fatalf("per-scan NEAR: %+v %v", decoded, err)
+	}
+}
+
+func appendJP2Box(dst []byte, kind string, payload []byte) []byte {
+	dst = binary.BigEndian.AppendUint32(dst, uint32(len(payload)+8))
+	dst = append(dst, kind...)
+
+	return append(dst, payload...)
 }

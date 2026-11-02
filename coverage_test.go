@@ -256,7 +256,7 @@ func TestNativeSignedAndHDR(t *testing.T) {
 	encoded.Reset()
 	hdr := jpegxl.Samples{Width: 3, Height: 1, Channels: 1, BitsPerSample: 32, ExponentBits: 8, Float: []float32{-0.5, 1.25, 100}}
 
-	err = jpegxl.EncodeSamples(&encoded, &hdr, &jpegxl.Options{Lossless: true, Effort: 1, Linear: true})
+	err = jpegxl.EncodeSamples(&encoded, &hdr, &jpegxl.Options{Lossless: true, Effort: 1, Linear: true, Container: true})
 	if err != nil {
 		t.Fatal(err)
 	}

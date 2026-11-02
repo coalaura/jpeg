@@ -15,7 +15,7 @@ Self-contained Go codecs for the JPEG family. Decode to `image.Image`, encode wi
 go get github.com/coalaura/jpeg
 ```
 
-Requires Go 1.27.3 or later and **CGO with a working C/C++17 toolchain** and its normal platform headers/libraries. GCC/MinGW, Clang and Zig-based toolchains are suitable; macOS needs its platform SDK.
+Requires Go 1.26 or later and **CGO with a working C/C++17 toolchain** and its normal platform headers/libraries. GCC/MinGW, Clang and Zig-based toolchains are suitable; macOS needs its platform SDK.
 
 Native sources and dependencies are bundled. Once the module is downloaded, builds work offline without generation, CMake, pkg-config, NASM or installed codec libraries.
 
@@ -57,7 +57,7 @@ err := jpeg.Encode(writer, img, &jpeg.Options{
 })
 ```
 
-Available output formats are `jpeg.JPEG`, `jpeg.JP2`, `jpeg.J2K`, `jpeg.JPEGLS`, `jpeg.JXLCodestream` and `jpeg.JXLContainer`. The root `Format` setting determines the container even when a codec's options specify otherwise.
+Available output formats are `jpeg.JPEG`, `jpeg.JP2`, `jpeg.J2K`, `jpeg.JPEGLS`, `jpeg.JXLCodestream` and `jpeg.JXLContainer`. The root `Format` setting determines the container even when a codec's options specify otherwise. Raw JXL requests that require a container (including level-10 lossless 16-bit encoding) return an error before writing output.
 
 Each codec also exposes its own `Encode`, `Decode` and `DecodeConfig` functions. For example, applications that only need JPEG-LS can import `github.com/coalaura/jpeg/jpegls` directly.
 
@@ -82,8 +82,8 @@ The individual codecs expose APIs for data that an `image.Image` cannot carry: `
 ## Coverage and limits
 
 - **Lossless encoding:** Classic JPEG requires the explicit `Lossless` option; quality 100 still uses DCT coding. JPEG-LS uses `NEAR=0` for exact samples. JPEG 2000 defaults to reversible lossless JP2. JPEG XL requires `Lossless: true`; distance zero alone does not guarantee exact samples.
-- **Sample precision:** Ordinary image encoding defaults to 8-bit samples. Set `BitsPerSample` when retaining higher precision. Native sample APIs support signed JPEG 2000 and floating-point JPEG XL data; display conversion requires explicit handling by the caller.
-- **Alpha and color:** Classic JPEG encoding rejects transparency. Raw J2K needs explicit color interpretation and four-component JPEG-LS needs an explicit RGBA interpretation. Unsupported or ambiguous display conversions return errors rather than silently guessing or clipping values.
+- **Sample precision:** JP2, JPEG-LS and JPEG XL image encoding retain 16 bits for `Gray16`, `RGBA64` and `NRGBA64` by default; other images and classic JPEG default to 8 bits. An explicit `BitsPerSample` overrides this. Native lossless JPEG-LS accepts 2..16 bits, JPEG XL accepts 2..16-bit unsigned samples and binary16/binary32 floating-point data, and reversible JPEG 2000 accepts 1..25-bit signed or unsigned components. JPEG 2000 also checks the actual coefficients after the selected color and wavelet transforms: magnitudes above 33,554,431 are rejected before output instead of truncated. Explicit rate/quality targets can still make reversible JPEG 2000 lossy. Display conversion of signed or floating-point data requires explicit handling by the caller.
+- **Alpha and color:** Native JP2 and JXL preserve straight or premultiplied alpha association. Classic JPEG encoding rejects transparency. Raw J2K needs explicit color interpretation and four-component JPEG-LS needs an explicit RGBA interpretation. JP2 retains ICC profiles and alpha declarations; palette JP2 configuration reports the expanded image layout. Unsupported or ambiguous display conversions return errors rather than silently guessing or clipping values.
 - **JPEG XL animation:** Encoding accepts full-canvas frames, rather than arbitrary layers or cropped-frame blending. General extra-channel preservation beyond alpha is not exposed.
 
 Decoders default to a 64 MiB compressed-input limit and a 16M-pixel limit. Codec-specific options control resource limits and native threading where supported. Allocation limits are not a cap on total process memory: decoding also needs Go-owned pixels and native working storage.
@@ -95,3 +95,9 @@ Linux, Windows and macOS on amd64 and arm64, with portable CPU baselines. Classi
 On Windows amd64, JPEG XL builds with GCC disable AVX2/AVX-512 paths to avoid a compiler stack-alignment bug. Highway retains SSE dispatch and the fast-lossless encoder uses its portable path. Clang/Zig builds retain the wider SIMD paths.
 
 See the [Go documentation](https://pkg.go.dev/github.com/coalaura/jpeg) and individual package references for option defaults, validation, resource limits and native sample representations.
+
+## License
+
+The Go wrapper and project-authored bridge code, tools and tests are licensed under the [Mozilla Public License 2.0](LICENSE) (MPL-2.0). This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+Bundled third-party sources in `internal/native` retain their upstream licenses and notices, included alongside those sources.

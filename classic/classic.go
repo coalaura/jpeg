@@ -135,7 +135,13 @@ func DecodeWithOptions(reader io.Reader, options *DecodeOptions) (image.Image, e
 		return img, nil
 	}
 
-	return pixels.Image(samples.Values, samples.Width, samples.Height, components(samples.ColorSpace), samples.BitsPerSample)
+	maxPixels := uint64(0)
+
+	if options != nil {
+		maxPixels = options.MaxPixels
+	}
+
+	return pixels.Image(samples.Values, samples.Width, samples.Height, components(samples.ColorSpace), samples.BitsPerSample, maxPixels)
 }
 
 func DecodeConfig(reader io.Reader) (image.Config, error) {

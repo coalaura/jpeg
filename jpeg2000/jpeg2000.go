@@ -11,7 +11,6 @@ import "C"
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"image"
 	"io"
@@ -55,7 +54,7 @@ type Progression int
 // lossless). Targets are approximate. Only one target list may be provided.
 type Options struct {
 	Format                  Format
-	BitsPerSample           int       // Zero selects 8 for image.Image.
+	BitsPerSample           int       // Zero retains 16-bit Go images; otherwise selects 8.
 	Irreversible            bool      // Use the lossy 9/7 wavelet rather than reversible 5/3.
 	Ratios                  []float64 // Compression ratios >=1, at most 100 quality layers.
 	PSNR                    []float64 // Decibels >=0, at most 100 quality layers.
@@ -110,12 +109,16 @@ type NativeImage struct {
 // data or applying ICC profiles. Unsupported representations remain available in
 // NativeImage. Associated alpha is rejected to avoid irreversible unpremultiplication.
 func (native *NativeImage) Image() (image.Image, error) {
+	return native.image(0)
+}
+
+func (native *NativeImage) image(maxPixels uint64) (image.Image, error) {
 	width, height, precision, channels, alpha, err := displayLayout(native)
 	if err != nil {
 		return nil, err
 	}
 
-	err = pixels.Check(width, height, channels, 0)
+	err = pixels.Check(width, height, channels, maxPixels)
 	if err != nil {
 		return nil, err
 	}
@@ -159,10 +162,10 @@ func (native *NativeImage) Image() (image.Image, error) {
 			rgba[index*4+3] = values[index*2+1]
 		}
 
-		return pixels.Image(rgba, width, height, 4, precision)
+		return pixels.Image(rgba, width, height, 4, precision, maxPixels)
 	}
 
-	return pixels.Image(values, width, height, channels, precision)
+	return pixels.Image(values, width, height, channels, precision, maxPixels)
 }
 
 func Decode(reader io.Reader) (image.Image, error) {
@@ -175,7 +178,13 @@ func DecodeWithOptions(reader io.Reader, options *DecodeOptions) (image.Image, e
 		return nil, err
 	}
 
-	return native.Image()
+	maxPixels := uint64(0)
+
+	if options != nil {
+		maxPixels = options.MaxPixels
+	}
+
+	return native.image(maxPixels)
 }
 
 func DecodeConfig(reader io.Reader) (image.Config, error) {
@@ -208,7 +217,7 @@ func Encode(writer io.Writer, img image.Image, options *Options) error {
 	}
 
 	if settings.BitsPerSample == 0 {
-		settings.BitsPerSample = 8
+		settings.BitsPerSample = pixels.Precision(img)
 	}
 
 	values, channels, err := pixels.Extract(img, settings.BitsPerSample, settings.Format != J2K)
@@ -281,6 +290,24 @@ func EncodeNative(writer io.Writer, img *NativeImage, options *Options) error {
 
 		if component.BitsPerSample < 1 || component.BitsPerSample > 31 || component.Alpha < 0 || component.Alpha > 2 || len(component.Values) != component.Width*component.Height {
 			return errors.New("jpeg2000: invalid component precision, alpha, or sample count")
+		}
+
+		// Keep transform intermediates within int32. The backend also checks
+		// actual reversible coefficients before Tier 1's six-bit left shift.
+		if !settings.Irreversible && component.BitsPerSample > 25 {
+			return errors.New("jpeg2000: reversible encoding supports at most 25-bit components")
+		}
+
+		if component.Alpha != 0 {
+			colorChannels := 3
+
+			if img.ColorSpace == Gray {
+				colorChannels = 1
+			}
+
+			if img.ColorSpace != SRGB && img.ColorSpace != Gray && img.ColorSpace != SYCC || index != colorChannels || len(img.Components) != colorChannels+1 {
+				return errors.New("jpeg2000: alpha requires a final opacity component after gray or RGB/YCC color channels")
+			}
 		}
 
 		minimum := int64(0)
@@ -426,8 +453,15 @@ func decode(reader io.Reader, options *DecodeOptions, header bool) (*NativeImage
 
 			img.Components[index].Alpha = 1
 		}
-	} else if header {
-		applyChannelDefinitions(data, img.Components, false)
+	} else if len(img.ICC) >= 128 && string(img.ICC[36:40]) == "acsp" {
+		switch string(img.ICC[16:20]) {
+		case "RGB ":
+			img.ColorSpace = SRGB
+		case "GRAY":
+			img.ColorSpace = Gray
+		case "CMYK":
+			img.ColorSpace = CMYK
+		}
 	}
 
 	return img, nil
@@ -585,48 +619,4 @@ func displayLayout(img *NativeImage) (int, int, int, int, int, error) {
 	}
 
 	return first.Width, first.Height, first.BitsPerSample, channels, alpha, nil
-}
-
-// OpenJPEG attaches channel definitions after decoding; config-only queries
-// inspect the JP2 header box instead, without requesting pixel reconstruction.
-func applyChannelDefinitions(data []byte, components []Component, inHeader bool) {
-	for len(data) >= 8 {
-		length := uint64(binary.BigEndian.Uint32(data))
-		header := uint64(8)
-
-		if length == 1 && len(data) >= 16 {
-			length = binary.BigEndian.Uint64(data[8:16])
-			header = 16
-		}
-
-		if length == 0 {
-			length = uint64(len(data))
-		}
-
-		if length < header || length > uint64(len(data)) {
-			return
-		}
-
-		body := data[header:length]
-
-		if string(data[4:8]) == "jp2h" && !inHeader {
-			applyChannelDefinitions(body, components, true)
-		} else if inHeader && string(data[4:8]) == "cdef" && len(body) >= 2 {
-			count := int(binary.BigEndian.Uint16(body))
-			body = body[2:]
-
-			for index := 0; index < count && len(body) >= 6; index++ {
-				channel := int(binary.BigEndian.Uint16(body))
-				kind := int(binary.BigEndian.Uint16(body[2:]))
-
-				if channel < len(components) && (kind == 1 || kind == 2) {
-					components[channel].Alpha = kind
-				}
-
-				body = body[6:]
-			}
-		}
-
-		data = data[length:]
-	}
 }

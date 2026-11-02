@@ -1509,6 +1509,20 @@ OPJ_BOOL opj_tcd_encode_tile(opj_tcd_t *p_tcd,
         }
         /* FIXME  _ProfStop(PGROUP_DWT); */
 
+		/* Tier 1 reserves six fractional bits and a sign bit. Reject coefficients
+		 * that would be truncated by its left shift, before emitting tile data. */
+		for (OPJ_UINT32 component = 0; component < p_tcd->image->numcomps; ++component) {
+			if (p_tcd->tcp->tccps[component].qmfbid != 1) continue;
+			opj_tcd_tilecomp_t *tile = &p_tcd->tcd_image->tiles->comps[component];
+			size_t count = (size_t)(tile->x1 - tile->x0) * (tile->y1 - tile->y0);
+			for (size_t sample = 0; sample < count; ++sample) {
+				if (tile->data[sample] < -33554431 || tile->data[sample] > 33554431) {
+					opj_event_msg(p_manager, EVT_ERROR, "Reversible coefficients exceed the exact 25-bit magnitude limit\n");
+					return OPJ_FALSE;
+				}
+			}
+		}
+
         /* FIXME  _ProfStart(PGROUP_T1); */
         if (! opj_tcd_t1_encode(p_tcd)) {
             return OPJ_FALSE;

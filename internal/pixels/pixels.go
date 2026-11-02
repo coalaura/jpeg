@@ -147,13 +147,25 @@ func sampleAt(img image.Image, x, y int) color.NRGBA64 {
 	}
 }
 
+// Precision preserves the sample depth of standard 16-bit Go images.
+func Precision(img image.Image) int {
+	if img != nil {
+		switch img.ColorModel() {
+		case color.Gray16Model, color.RGBA64Model, color.NRGBA64Model:
+			return 16
+		}
+	}
+
+	return 8
+}
+
 // Image expands the sample range to the corresponding Go color range.
-func Image(samples []uint16, width, height, components, bits int) (image.Image, error) {
+func Image(samples []uint16, width, height, components, bits int, maxPixels uint64) (image.Image, error) {
 	if components != 1 && components != 3 && components != 4 || bits < 2 || bits > 16 {
 		return nil, errors.New("jpeg: samples require explicit color interpretation")
 	}
 
-	err := Check(width, height, components, 0)
+	err := Check(width, height, components, maxPixels)
 	if err != nil {
 		return nil, err
 	}

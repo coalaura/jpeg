@@ -23,9 +23,9 @@ var dependencies = []dependency{
 	{"simde", "simd-everywhere/simde", "71fd833d9666141edcd1d3c109a80e228303d8d7"},
 	{"openjpeg", "uclouvain/openjpeg", "6c4a29b00211eb0430fa0e5e890f1ce5c80f409f"},
 	{"charls", "team-charls/charls", "36dd3307e070d8fbc765c3ba890b7e681046fa39"},
-	{"libjxl", "libjxl/libjxl", "794a5dcf0d54f9f0b20d288a12e87afb91d20dfc"},
+	{"libjxl", "libjxl/libjxl", "a7a9c787341cf703dede03c2009fa460cae5e5df"},
 	{"highway", "google/highway", "457c891775a7397bdb0376bb1031e6e027af1c48"},
-	{"brotli", "google/brotli", "36533a866ed1ca4b75cf049f4521e4ec5fe24727"},
+	{"brotli", "google/brotli", "028fb5a23661f123017c060daa546b55cf4bde29"},
 	{"lcms", "mm2/Little-CMS", "5176347635785e53ee5cee92328f76fda766ecc6"},
 }
 
@@ -164,6 +164,16 @@ func generateOpenJPEG() {
 	j2k = patch(j2k, "const char* num_threads_str = getenv(\"OPJ_NUM_THREADS\");", "/* coalaura: the bridge sets a bounded worker count explicitly. */\n    const char* num_threads_str = NULL;")
 
 	write("internal/native/openjpeg/src/lib/openjp2/j2k.c", j2k)
+
+	jp2Path := "internal/native/openjpeg/src/lib/openjp2/jp2.c"
+	jp2 := patch(read(jp2Path), "switch (jp2->enumcs) {", "switch (image->color_space) {")
+	jp2 = patch(jp2, "case 16:\n        case 18:", "case OPJ_CLRSPC_SRGB:\n        case OPJ_CLRSPC_SYCC:")
+	jp2 = patch(jp2, "case 17:\n            color_channels", "case OPJ_CLRSPC_GRAY:\n            color_channels")
+	jp2 = patch(jp2, "jp2->color.jp2_cdef->info[i].typ = 1U; /* Opacity channel */", "jp2->color.jp2_cdef->info[i].typ = image->comps[i].alpha; /* Preserve opacity association. */")
+	write(jp2Path, jp2+openjpegHeaderConfig)
+
+	tcdPath := "internal/native/openjpeg/src/lib/openjp2/tcd.c"
+	write(tcdPath, patch(read(tcdPath), "        /* FIXME  _ProfStart(PGROUP_T1); */", openjpegCoefficientCheck+"        /* FIXME  _ProfStart(PGROUP_T1); */"))
 	write("internal/native/openjpeg/src/lib/openjp2/opj_config.h", "#define OPJ_VERSION_MAJOR 2\n#define OPJ_VERSION_MINOR 5\n#define OPJ_VERSION_BUILD 4\n")
 	write("internal/native/openjpeg/src/lib/openjp2/opj_config_private.h", openjpegConfig)
 }
@@ -276,7 +286,7 @@ func generateJXL() {
 		write("internal/native/libjxl/lib/include/jxl/"+strings.ToLower(component)+"_export.h", "#pragma once\n#define "+component+"_EXPORT\n#define "+component+"_NO_EXPORT\n#define "+component+"_DEPRECATED __attribute__((deprecated))\n#define "+component+"_DEPRECATED_EXPORT "+component+"_DEPRECATED\n#define "+component+"_DEPRECATED_NO_EXPORT "+component+"_DEPRECATED\n")
 	}
 
-	write("internal/native/libjxl/lib/include/jxl/version.h", "#pragma once\n#define JPEGXL_MAJOR_VERSION 0\n#define JPEGXL_MINOR_VERSION 11\n#define JPEGXL_PATCH_VERSION 1\n#define JPEGXL_COMPUTE_VERSION(major, minor, patch) ((major) * 1000000 + (minor) * 1000 + (patch))\n#define JPEGXL_NUMERIC_VERSION JPEGXL_COMPUTE_VERSION(0, 11, 1)\n")
+	write("internal/native/libjxl/lib/include/jxl/version.h", "#pragma once\n#define JPEGXL_MAJOR_VERSION 0\n#define JPEGXL_MINOR_VERSION 12\n#define JPEGXL_PATCH_VERSION 0\n#define JPEGXL_COMPUTE_VERSION(major, minor, patch) ((major) * 1000000 + (minor) * 1000 + (patch))\n#define JPEGXL_NUMERIC_VERSION JPEGXL_COMPUTE_VERSION(0, 12, 0)\n")
 
 	fastLossless := "internal/native/libjxl/lib/jxl/enc_fast_lossless.cc"
 	write(fastLossless, patch(read(fastLossless), "// Enable NEON and AVX2/AVX512 if not asked to do otherwise", jxlFastLosslessMinGWConfig+"// Enable NEON and AVX2/AVX512 if not asked to do otherwise"))
