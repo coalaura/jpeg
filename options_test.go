@@ -9,6 +9,7 @@ import (
 	stdjpeg "image/jpeg"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/coalaura/jpeg"
@@ -18,6 +19,12 @@ import (
 	"github.com/coalaura/jpeg/jpegls"
 	"github.com/coalaura/jpeg/jpegxl"
 )
+
+type jpegxlLosslessCase struct {
+	name    string
+	setting jpegxl.Setting
+	reject  bool
+}
 
 func TestClassicPrecisionAndCMYK(t *testing.T) {
 	for precision := 2; precision <= 16; precision++ {
@@ -283,9 +290,68 @@ func TestJPEGXLResourceAndLosslessOptions(t *testing.T) {
 		t.Fatalf("recompression dimension limit: %v", err)
 	}
 
-	err = jpegxl.Encode(&encoded, image.NewNRGBA(image.Rect(0, 0, 3, 3)), &jpegxl.Options{Lossless: true, AlphaDistance: new(float32(1))})
+	img := image.NewNRGBA(image.Rect(0, 0, 3, 2))
+	copy(img.Pix, []byte{17, 54, 91, 0, 255, 3, 79, 255, 7, 193, 211, 128, 101, 55, 37, 1, 0, 255, 96, 64, 249, 131, 5, 0})
+
+	err = jpegxl.Encode(&encoded, img, &jpegxl.Options{Lossless: true, AlphaDistance: new(float32(1))})
 	if err == nil {
 		t.Fatal("lossless coding accepted lossy alpha")
+	}
+
+	cases := []jpegxlLosslessCase{
+		{name: "default"},
+		{name: "Resampling=1", setting: jpegxl.Setting{ID: jpegxl.Resampling, Value: 1}},
+		{name: "Resampling=2", setting: jpegxl.Setting{ID: jpegxl.Resampling, Value: 2}, reject: true},
+		{name: "ExtraChannelResampling=2", setting: jpegxl.Setting{ID: jpegxl.ExtraChannelResampling, Value: 2}, reject: true},
+		{name: "LossyPalette=1", setting: jpegxl.Setting{ID: jpegxl.LossyPalette, Value: 1}, reject: true},
+		{name: "Gaborish=1", setting: jpegxl.Setting{ID: jpegxl.Gaborish, Value: 1}, reject: true},
+		{name: "EdgePreservingFilter=1", setting: jpegxl.Setting{ID: jpegxl.EdgePreservingFilter, Value: 1}, reject: true},
+	}
+
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+
+			options := jpegxl.Options{Lossless: true}
+
+			if test.setting.ID != 0 {
+				options.Settings = []jpegxl.Setting{test.setting}
+			}
+
+			err := jpegxl.Encode(&output, img, &options)
+
+			if test.reject {
+				if err == nil || !strings.Contains(err.Error(), test.name) || output.Len() != 0 {
+					t.Fatalf("incompatible lossless setting: error=%v, output=%d bytes", err, output.Len())
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			decoded, err := jpegxl.Decode(bytes.NewReader(output.Bytes()))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if decoded.Bounds() != img.Bounds() {
+				t.Fatalf("lossless bounds: %v != %v", decoded.Bounds(), img.Bounds())
+			}
+
+			for y := range img.Bounds().Dy() {
+				for x := range img.Bounds().Dx() {
+					actual := color.NRGBAModel.Convert(decoded.At(x, y)).(color.NRGBA)
+					expected := img.NRGBAAt(x, y)
+
+					if actual != expected {
+						t.Fatalf("lossless pixel (%d, %d): %+v != %+v", x, y, actual, expected)
+					}
+				}
+			}
+		})
 	}
 
 	_, err = jpegxl.DecodeWithOptions(bytes.NewReader(fixtureBytes(t, "gray16.jxl")), &jpegxl.DecodeOptions{MaxMemoryBytes: 1})

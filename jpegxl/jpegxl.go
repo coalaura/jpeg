@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"image"
 	stdjpeg "image/jpeg"
 	"io"
@@ -649,6 +650,13 @@ func encoderOptions(options *Options) (C.cj_xl_options, error) {
 			return native, errors.New("jpegxl: lossless coding must preserve invisible RGB")
 		}
 
+		if options.Lossless {
+			err = validateLosslessSetting(setting)
+			if err != nil {
+				return native, err
+			}
+		}
+
 		seen |= 1 << setting.ID
 		native.setting_ids[index] = C.int(setting.ID)
 		native.setting_values[index] = C.int(setting.Value)
@@ -735,6 +743,28 @@ func resourceOptions(native *C.cj_xl_options, threads int, memory uint64) error 
 	native.max_pixels = pixels.MaxPixels
 
 	return nil
+}
+
+func validateLosslessSetting(setting Setting) error {
+	var name string
+
+	// libjxl's lossless mode does not reset resampling, lossy palettes or filters.
+	switch {
+	case setting.ID == Resampling && setting.Value > 1:
+		name = "Resampling"
+	case setting.ID == ExtraChannelResampling && setting.Value > 1:
+		name = "ExtraChannelResampling"
+	case setting.ID == LossyPalette && setting.Value == 1:
+		name = "LossyPalette"
+	case setting.ID == Gaborish && setting.Value == 1:
+		name = "Gaborish"
+	case setting.ID == EdgePreservingFilter && setting.Value > 0:
+		name = "EdgePreservingFilter"
+	default:
+		return nil
+	}
+
+	return fmt.Errorf("jpegxl: lossless coding is incompatible with %s=%d", name, setting.Value)
 }
 
 func validDistance(value float32) bool {
