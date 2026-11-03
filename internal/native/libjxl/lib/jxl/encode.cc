@@ -1238,9 +1238,7 @@ JxlEncoderStatus JxlEncoderSetICCProfile(JxlEncoder* enc,
     jxl::SetIntensityTarget(&enc->metadata.m);
   }
 
-  if (!enc->basic_info.uses_original_profile && enc->cms_set) {
-    enc->metadata.m.color_encoding.DecideIfWantICC(enc->cms);
-  }
+  // Preserve explicitly supplied ICC bytes, including private tags.
 
   return JxlErrorOrStatus::Success();
 }

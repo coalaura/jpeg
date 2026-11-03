@@ -24,6 +24,7 @@ import (
 	"unicode/utf8"
 	"unsafe"
 
+	"github.com/coalaura/jpeg/internal/icc"
 	"github.com/coalaura/jpeg/internal/pixels"
 )
 
@@ -420,6 +421,15 @@ func RecompressJPEG(writer io.Writer, reader io.Reader, options *Options) error 
 	data, err := pixels.Read(reader, 0)
 	if err != nil {
 		return err
+	}
+
+	_, ordered, err := icc.JPEG(data)
+	if err != nil {
+		return fmt.Errorf("jpegxl: %w", err)
+	}
+
+	if !ordered {
+		return errors.New("jpegxl: JPEG reconstruction cannot preserve out-of-order ICC segments with this backend; keep the original JPEG or use pixel encoding")
 	}
 
 	config, err := stdjpeg.DecodeConfig(bytes.NewReader(data))

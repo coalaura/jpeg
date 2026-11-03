@@ -290,6 +290,12 @@ func generateJXL() {
 
 	fastLossless := "internal/native/libjxl/lib/jxl/enc_fast_lossless.cc"
 	write(fastLossless, patch(read(fastLossless), "// Enable NEON and AVX2/AVX512 if not asked to do otherwise", jxlFastLosslessMinGWConfig+"// Enable NEON and AVX2/AVX512 if not asked to do otherwise"))
+
+	iccEncoder := "internal/native/libjxl/lib/jxl/enc_icc_codec.cc"
+	write(iccEncoder, patch(read(iccEncoder), "  EntropyEncodingData code;", jxlICCCompressionConfig+"  EntropyEncodingData code;"))
+
+	encoder := "internal/native/libjxl/lib/jxl/encode.cc"
+	write(encoder, patch(read(encoder), jxlICCDiscardConfig, "  // Preserve explicitly supplied ICC bytes, including private tags.\n"))
 }
 
 func wrapper(pkg, dep, source, prefix string) {

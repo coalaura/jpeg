@@ -13,12 +13,14 @@ import "C"
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"io"
 	"slices"
 	"unsafe"
 
+	"github.com/coalaura/jpeg/internal/icc"
 	"github.com/coalaura/jpeg/internal/pixels"
 )
 
@@ -90,6 +92,7 @@ type DecodeOptions struct {
 	BlockSmoothing   *bool  // Nil selects true.
 	AllowWarnings    bool   // Default rejects truncation and other native warnings.
 	ReadMetadata     bool   // Retain APP/COM markers, up to 4 MiB.
+	ReadICC          bool   // Assemble ICC in Samples.ICC, up to 4 MiB of profile data; skip unrelated metadata unless ReadMetadata is set.
 	MaxScans         int    // Zero selects 1000.
 	MaxPixels        uint64 // Zero selects 16 million, checked before and after scaling.
 	MaxInputBytes    int64  // Zero selects 64 MiB; maximum 512 MiB.
@@ -109,6 +112,7 @@ type Samples struct {
 	Progressive      bool
 	Lossless         bool
 	Markers          []Marker
+	ICC              []byte
 }
 
 func Decode(reader io.Reader) (image.Image, error) {
@@ -314,6 +318,15 @@ func decode(reader io.Reader, options *DecodeOptions, header bool) (*Samples, er
 		return nil, err
 	}
 
+	var profile []byte
+
+	if settings.ReadICC {
+		profile, _, err = icc.JPEG(data)
+		if err != nil {
+			return nil, fmt.Errorf("classic: %w", err)
+		}
+	}
+
 	var native C.cj_jpeg_options
 
 	native.scale_num = C.int(settings.ScaleNumerator)
@@ -344,6 +357,7 @@ func decode(reader io.Reader, options *DecodeOptions, header bool) (*Samples, er
 	}
 
 	samples := &Samples{Width: int(result.width), Height: int(result.height), BitsPerSample: int(result.bits), ColorSpace: space, SourceColorSpace: ColorSpace(native.source_color), Progressive: native.progressive_input != 0, Lossless: native.lossless_input != 0}
+	samples.ICC = profile
 
 	if !header {
 		samples.Values = slices.Clone(unsafe.Slice((*uint16)(unsafe.Pointer(result.samples)), samples.Width*samples.Height*int(result.components)))

@@ -75,6 +75,21 @@ const jxlFastLosslessMinGWConfig = `// This encoder has its own SIMD dispatch, i
 
 `
 
+const jxlICCCompressionConfig = `  // The decoder checks expansion against consumed bits every 64 KiB. LZ77
+  // can exceed that bound for valid repetitive profiles. One literal Huffman
+  // histogram includes the diverse ICC header as well as repetitive data,
+  // preventing zero-bit single-symbol contexts and keeping the guard intact.
+  if (enc.size() >= 65536) {
+    params.lz77_method = HistogramParams::LZ77Method::kNone;
+    params.max_histograms = 1;
+  }
+`
+
+const jxlICCDiscardConfig = `  if (!enc->basic_info.uses_original_profile && enc->cms_set) {
+    enc->metadata.m.color_encoding.DecideIfWantICC(enc->cms);
+  }
+`
+
 const openjpegCoefficientCheck = `		/* Tier 1 reserves six fractional bits and a sign bit. Reject coefficients
 		 * that would be truncated by its left shift, before emitting tile data. */
 		for (OPJ_UINT32 component = 0; component < p_tcd->image->numcomps; ++component) {

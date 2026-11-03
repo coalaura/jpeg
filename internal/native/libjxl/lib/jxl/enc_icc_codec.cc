@@ -471,6 +471,14 @@ Status WriteICC(const Span<const uint8_t> icc, BitWriter* JXL_RESTRICT writer,
   HistogramParams params;
   params.lz77_method = enc.size() < 16384 ? HistogramParams::LZ77Method::kOptimal
                                          : HistogramParams::LZ77Method::kLZ77;
+  // The decoder checks expansion against consumed bits every 64 KiB. LZ77
+  // can exceed that bound for valid repetitive profiles. One literal Huffman
+  // histogram includes the diverse ICC header as well as repetitive data,
+  // preventing zero-bit single-symbol contexts and keeping the guard intact.
+  if (enc.size() >= 65536) {
+    params.lz77_method = HistogramParams::LZ77Method::kNone;
+    params.max_histograms = 1;
+  }
   EntropyEncodingData code;
   params.force_huffman = true;
   JXL_ASSIGN_OR_RETURN(size_t cost, BuildAndEncodeHistograms(
